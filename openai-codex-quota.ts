@@ -4,8 +4,16 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import * as os from "node:os";
 
 const OPENAI_CODEX_PROVIDER = "openai-codex";
+const GITHUB_COPILOT_PROVIDER = "github-copilot";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const USER_INFO_API_VERSION = "2026-06-01";
 const REFRESH_RENDER_INTERVAL_MS = 60_000;
+const COPILOT_HEADERS = {
+	"User-Agent": "GitHubCopilotChat/0.35.0",
+	"Editor-Version": "vscode/1.107.0",
+	"Editor-Plugin-Version": "copilot-chat/0.35.0",
+	"Copilot-Integration-Id": "vscode-chat",
+};
 
 function sanitizeStatusText(text) {
 	return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
@@ -94,6 +102,11 @@ function isActiveCodexSubscriptionModel(currentModel, modelRegistry) {
 	return modelRegistry ? modelRegistry.isUsingOAuth(currentModel) : true;
 }
 
+function isActiveCopilotSubscriptionModel(currentModel, modelRegistry) {
+	if (!currentModel || currentModel.provider !== GITHUB_COPILOT_PROVIDER) return false;
+	return modelRegistry ? modelRegistry.isUsingOAuth(currentModel) : true;
+}
+
 function getWindowColor(theme, label, usedPercent) {
 	if (label === "5h") {
 		if (usedPercent > 75) return "error";
@@ -133,6 +146,29 @@ function colorQuotaLabel(theme, color, text) {
 	return theme.fg(color, text);
 }
 
+function normalizeServerUrl(value) {
+	if (typeof value !== "string" || !value.trim()) return undefined;
+	const withProtocol = value.includes("://") ? value.trim() : `https://${value.trim()}`;
+	return withProtocol.replace(/\/+$/, "");
+}
+
+function getApiUrl(serverUrl) {
+	if (serverUrl === "https://github.com") return "https://api.github.com";
+	return serverUrl.includes("://api.") ? serverUrl : serverUrl.replace("://", "://api.");
+}
+
+function formatResetDate(dateText) {
+	const date = new Date(dateText);
+	if (Number.isNaN(date.getTime())) return dateText;
+	return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function getRemainingColor(percentRemaining) {
+	if (percentRemaining <= 10) return "error";
+	if (percentRemaining <= 25) return "warning";
+	return "success";
+}
+
 function renderQuota(theme, quotaState) {
 	if (!quotaState?.primaryWindow || !quotaState?.secondaryWindow) return "";
 
@@ -149,6 +185,22 @@ function renderQuota(theme, quotaState) {
 	return `${theme.fg("dim", " • ")}${primary}${theme.fg("dim", " | ")}${secondary}`;
 }
 
+function renderCopilotQuota(theme, copilotQuotaState) {
+	const premium = copilotQuotaState?.premiumInteractions;
+	if (!premium) return "";
+
+	if (premium.unlimited) {
+		return `${theme.fg("dim", " • ")}${colorQuotaLabel(theme, "success", "1m ∞")}`;
+	}
+
+	if (typeof premium.percentRemaining !== "number") return "";
+
+	const color = getRemainingColor(premium.percentRemaining);
+	const label = `1m ${formatPercent(premium.percentRemaining)}`;
+	const details = copilotQuotaState.quotaResetDate ? ` (${formatResetDate(copilotQuotaState.quotaResetDate)})` : "";
+	return `${theme.fg("dim", " • ")}${colorQuotaLabel(theme, color, label)}${theme.fg("dim", details)}`;
+}
+
 export default function openaiCodexQuotaExtension(pi) {
 	const authStorage = AuthStorage.create();
 
@@ -157,6 +209,12 @@ export default function openaiCodexQuotaExtension(pi) {
 	let quotaState = {
 		primaryWindow: null,
 		secondaryWindow: null,
+		lastUpdatedAt: 0,
+		lastError: undefined,
+	};
+	let copilotQuotaState = {
+		premiumInteractions: null,
+		quotaResetDate: undefined,
 		lastUpdatedAt: 0,
 		lastError: undefined,
 	};
@@ -207,36 +265,102 @@ export default function openaiCodexQuotaExtension(pi) {
 		};
 	}
 
-	async function refreshQuotaIfNeeded(reason) {
-		if (!isActiveCodexSubscriptionModel(currentModel, modelRegistry)) {
-			quotaState = {
-				primaryWindow: null,
-				secondaryWindow: null,
-				lastUpdatedAt: quotaState.lastUpdatedAt,
-				lastError: undefined,
-			};
-			return;
+	async function fetchCopilotQuota() {
+		const credential = authStorage.get(GITHUB_COPILOT_PROVIDER);
+		const serverUrl = normalizeServerUrl(credential?.enterpriseUrl) || "https://github.com";
+		const apiUrl = getApiUrl(serverUrl);
+		const accessToken = credential?.refresh;
+
+		if (!accessToken) {
+			throw new Error("Missing GitHub Copilot refresh token");
 		}
 
-		if (refreshInFlight) {
+		const response = await fetch(new URL("copilot_internal/user", apiUrl), {
+			method: "GET",
+			headers: {
+				Authorization: `Bearer ${accessToken}`,
+				Accept: "application/json",
+				"X-GitHub-Api-Version": USER_INFO_API_VERSION,
+				...COPILOT_HEADERS,
+			},
+		});
+
+		const text = await response.text();
+		if (!response.ok) {
+			throw new Error(`GitHub Copilot user info request failed (${response.status}): ${text.slice(0, 400)}`);
+		}
+
+		const userInfo = JSON.parse(text);
+		const premium = userInfo?.quota_snapshots?.premium_interactions;
+		return {
+			premiumInteractions: premium
+				? {
+					unlimited: Boolean(premium.unlimited),
+					overageEnabled: Boolean(premium.overage_permitted),
+					overageUsed: typeof premium.overage_count === "number" ? premium.overage_count : 0,
+					quota: typeof premium.entitlement === "number" ? premium.entitlement : undefined,
+					percentRemaining:
+						typeof premium.percent_remaining === "number" ? premium.percent_remaining : undefined,
+				}
+				: null,
+			quotaResetDate: userInfo?.quota_reset_date,
+			lastUpdatedAt: Date.now(),
+			lastError: undefined,
+		};
+	}
+
+	async function refreshQuotaIfNeeded(reason) {
+		if (!currentModel) return;
+
+		if (isActiveCodexSubscriptionModel(currentModel, modelRegistry)) {
+			if (refreshInFlight) return refreshInFlight;
+			refreshInFlight = (async () => {
+				try {
+					quotaState = await fetchQuota();
+				} catch (error) {
+					quotaState = {
+						...quotaState,
+						lastError: error instanceof Error ? `${reason}: ${error.message}` : `${reason}: ${String(error)}`,
+					};
+					console.warn(`[openai-codex-quota] ${quotaState.lastError}`);
+				} finally {
+					refreshInFlight = null;
+				}
+			})();
 			return refreshInFlight;
 		}
 
-		refreshInFlight = (async () => {
-			try {
-				quotaState = await fetchQuota();
-			} catch (error) {
-				quotaState = {
-					...quotaState,
-					lastError: error instanceof Error ? `${reason}: ${error.message}` : `${reason}: ${String(error)}`,
-				};
-				console.warn(`[openai-codex-quota] ${quotaState.lastError}`);
-			} finally {
-				refreshInFlight = null;
-			}
-		})();
+		quotaState = {
+			primaryWindow: null,
+			secondaryWindow: null,
+			lastUpdatedAt: quotaState.lastUpdatedAt,
+			lastError: undefined,
+		};
 
-		return refreshInFlight;
+		if (isActiveCopilotSubscriptionModel(currentModel, modelRegistry)) {
+			if (refreshInFlight) return refreshInFlight;
+			refreshInFlight = (async () => {
+				try {
+					copilotQuotaState = await fetchCopilotQuota();
+				} catch (error) {
+					copilotQuotaState = {
+						...copilotQuotaState,
+						lastError: error instanceof Error ? `${reason}: ${error.message}` : `${reason}: ${String(error)}`,
+					};
+					console.warn(`[github-copilot-quota] ${copilotQuotaState.lastError}`);
+				} finally {
+					refreshInFlight = null;
+				}
+			})();
+			return refreshInFlight;
+		}
+
+		copilotQuotaState = {
+			premiumInteractions: null,
+			quotaResetDate: undefined,
+			lastUpdatedAt: copilotQuotaState.lastUpdatedAt,
+			lastError: undefined,
+		};
 	}
 
 	function installFooter(ctx) {
@@ -282,6 +406,8 @@ export default function openaiCodexQuotaExtension(pi) {
 
 					if (isActiveCodexSubscriptionModel(currentModel, modelRegistry)) {
 						modelText += renderQuota(theme, quotaState);
+					} else if (isActiveCopilotSubscriptionModel(currentModel, modelRegistry)) {
+						modelText += renderCopilotQuota(theme, copilotQuotaState);
 					}
 
 					let leftWidth = visibleWidth(left);
