@@ -157,16 +157,39 @@ function getApiUrl(serverUrl) {
 	return serverUrl.includes("://api.") ? serverUrl : serverUrl.replace("://", "://api.");
 }
 
-function formatResetDate(dateText) {
-	const date = new Date(dateText);
-	if (Number.isNaN(date.getTime())) return dateText;
-	return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+function getPreviousMonthlyResetDate(nextResetDate) {
+	return new Date(
+		nextResetDate.getFullYear(),
+		nextResetDate.getMonth() - 1,
+		nextResetDate.getDate(),
+		nextResetDate.getHours(),
+		nextResetDate.getMinutes(),
+		nextResetDate.getSeconds(),
+		nextResetDate.getMilliseconds(),
+	);
+}
+
+function clampPercent(value) {
+	return Math.max(0, Math.min(100, value));
 }
 
 function getRemainingColor(percentRemaining) {
 	if (percentRemaining <= 10) return "error";
 	if (percentRemaining <= 25) return "warning";
 	return "success";
+}
+
+function getCopilotGoalPercent(quotaResetDate) {
+	if (!quotaResetDate) return undefined;
+	const nextResetDate = new Date(quotaResetDate);
+	if (Number.isNaN(nextResetDate.getTime())) return undefined;
+
+	const previousResetDate = getPreviousMonthlyResetDate(nextResetDate);
+	const now = Date.now();
+	const totalMs = nextResetDate.getTime() - previousResetDate.getTime();
+	if (totalMs <= 0) return undefined;
+	const elapsedMs = now - previousResetDate.getTime();
+	return clampPercent((elapsedMs / totalMs) * 100);
 }
 
 function renderQuota(theme, quotaState) {
@@ -187,18 +210,18 @@ function renderQuota(theme, quotaState) {
 
 function renderCopilotQuota(theme, copilotQuotaState) {
 	const premium = copilotQuotaState?.premiumInteractions;
-	if (!premium) return "";
+	if (!premium || typeof premium.percentRemaining !== "number") return "";
 
 	if (premium.unlimited) {
-		return `${theme.fg("dim", " • ")}${colorQuotaLabel(theme, "success", "1m ∞")}`;
+		return `${theme.fg("dim", " • ")}quota: ${colorQuotaLabel(theme, "success", "∞")}`;
 	}
 
-	if (typeof premium.percentRemaining !== "number") return "";
-
+	const usedPercent = clampPercent(100 - premium.percentRemaining);
+	const goalPercent = getCopilotGoalPercent(copilotQuotaState.quotaResetDate);
 	const color = getRemainingColor(premium.percentRemaining);
-	const label = `1m ${formatPercent(premium.percentRemaining)}`;
-	const details = copilotQuotaState.quotaResetDate ? ` (${formatResetDate(copilotQuotaState.quotaResetDate)})` : "";
-	return `${theme.fg("dim", " • ")}${colorQuotaLabel(theme, color, label)}${theme.fg("dim", details)}`;
+	const usedLabel = colorQuotaLabel(theme, color, formatPercent(usedPercent));
+	const goalLabel = theme.fg("dim", typeof goalPercent === "number" ? formatPercent(goalPercent) : "--");
+	return `${theme.fg("dim", " • ")}quota: ${usedLabel}${theme.fg("dim", " / ")}${goalLabel}`;
 }
 
 export default function openaiCodexQuotaExtension(pi) {
