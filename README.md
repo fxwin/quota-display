@@ -4,11 +4,9 @@
 
 ## Features
 
-- shows Codex 5h and 1w quota
-- shows GitHub Copilot quota as used vs. goal
-- follows your currently active model/provider
+- shows Codex 5h and weekly quota
+- shows GitHub Copilot monthly quota as used vs. goal
 - uses your existing pi `/login`
-- refreshes in the background without slowing model switches
 
 ## Setup
 
@@ -16,12 +14,6 @@
 
 ```bash
 pi install git:github.com/fxwin/quota-display
-```
-
-Or from a local checkout:
-
-```bash
-pi install /absolute/path/to/quota-display
 ```
 
 2. Reload pi:
