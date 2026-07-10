@@ -505,7 +505,6 @@ export default function openaiCodexQuotaExtension(pi) {
 	pi.on("model_select", async (event, ctx) => {
 		currentModel = event.model;
 		modelRegistry = ctx.modelRegistry;
-		void refreshQuotaIfNeeded("model_select");
 	});
 
 	pi.on("agent_settled", async (_event, _ctx) => {
