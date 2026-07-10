@@ -1,0 +1,14 @@
+{
+  "name": "pi-openai-codex-quota-display",
+  "version": "0.1.0",
+  "description": "Pi extension that shows OpenAI Codex subscription quota in the footer.",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./openai-codex-quota.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
