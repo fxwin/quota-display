@@ -354,7 +354,7 @@ export default function openaiCodexQuotaExtension(pi) {
 						...quotaState,
 						lastError: error instanceof Error ? `${reason}: ${error.message}` : `${reason}: ${String(error)}`,
 					};
-					console.warn(`[openai-codex-quota] ${quotaState.lastError}`);
+					console.warn(`[quota-display] ${quotaState.lastError}`);
 				} finally {
 					refreshInFlight = null;
 				}

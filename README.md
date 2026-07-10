@@ -43,7 +43,7 @@ Then run:
 This repo can be symlinked into pi's global extensions directory:
 
 ```bash
-ln -s /absolute/path/to/quota-display/openai-codex-quota.ts ~/.pi/agent/extensions/openai-codex-quota.ts
+ln -s /absolute/path/to/quota-display/quota-display.ts ~/.pi/agent/extensions/quota-display.ts
 ```
 
 Then edit the file here and run `/reload` in pi. Changes to quota fetching are performed in the background.
