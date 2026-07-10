@@ -11,16 +11,14 @@
 ## Setup
 
 1. Install the extension:
-
-```bash
-pi install git:github.com/fxwin/quota-display
-```
+   ```bash
+   pi install git:github.com/fxwin/quota-display
+   ```
 
 2. Reload pi:
-
-```bash
-/reload
-```
+   ```bash
+   /reload
+   ```
 
 3. Make sure you're logged in with `/login` for one or both of:
    - ChatGPT Plus/Pro (Codex Subscription)
