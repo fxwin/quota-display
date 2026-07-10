@@ -219,9 +219,8 @@ function renderCopilotQuota(theme, copilotQuotaState) {
 	const usedPercent = clampPercent(100 - premium.percentRemaining);
 	const goalPercent = getCopilotGoalPercent(copilotQuotaState.quotaResetDate);
 	const color = getRemainingColor(premium.percentRemaining);
-	const usedLabel = colorQuotaLabel(theme, color, formatPercent(usedPercent));
-	const goalLabel = theme.fg("dim", typeof goalPercent === "number" ? formatPercent(goalPercent) : "--");
-	return `${theme.fg("dim", " • ")}quota: ${usedLabel}${theme.fg("dim", " / ")}${goalLabel}`;
+	const quotaText = `quota: ${formatPercent(usedPercent)} / ${typeof goalPercent === "number" ? formatPercent(goalPercent) : "--"}`;
+	return `${theme.fg("dim", " • ")}${colorQuotaLabel(theme, color, quotaText)}`;
 }
 
 export default function openaiCodexQuotaExtension(pi) {
@@ -242,6 +241,15 @@ export default function openaiCodexQuotaExtension(pi) {
 		lastError: undefined,
 	};
 	let refreshInFlight = null;
+	const requestRenderCallbacks = new Set();
+
+	function requestFooterRender() {
+		for (const callback of requestRenderCallbacks) {
+			try {
+				callback();
+			} catch {}
+		}
+	}
 
 	async function fetchQuota() {
 		const apiKey = await authStorage.getApiKey(OPENAI_CODEX_PROVIDER);
@@ -340,6 +348,7 @@ export default function openaiCodexQuotaExtension(pi) {
 			refreshInFlight = (async () => {
 				try {
 					quotaState = await fetchQuota();
+					requestFooterRender();
 				} catch (error) {
 					quotaState = {
 						...quotaState,
@@ -365,6 +374,7 @@ export default function openaiCodexQuotaExtension(pi) {
 			refreshInFlight = (async () => {
 				try {
 					copilotQuotaState = await fetchCopilotQuota();
+					requestFooterRender();
 				} catch (error) {
 					copilotQuotaState = {
 						...copilotQuotaState,
@@ -390,11 +400,14 @@ export default function openaiCodexQuotaExtension(pi) {
 		if (ctx.mode !== "tui") return;
 
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
-			const timer = setInterval(() => tui.requestRender(), REFRESH_RENDER_INTERVAL_MS);
+			const requestRender = () => tui.requestRender();
+			requestRenderCallbacks.add(requestRender);
+			const unsubscribe = footerData.onBranchChange(requestRender);
+			const timer = setInterval(requestRender, REFRESH_RENDER_INTERVAL_MS);
 
 			return {
 				dispose() {
+					requestRenderCallbacks.delete(requestRender);
 					unsubscribe();
 					clearInterval(timer);
 				},
@@ -486,17 +499,17 @@ export default function openaiCodexQuotaExtension(pi) {
 		currentModel = ctx.model;
 		modelRegistry = ctx.modelRegistry;
 		installFooter(ctx);
-		await refreshQuotaIfNeeded("session_start");
+		void refreshQuotaIfNeeded("session_start");
 	});
 
 	pi.on("model_select", async (event, ctx) => {
 		currentModel = event.model;
 		modelRegistry = ctx.modelRegistry;
-		await refreshQuotaIfNeeded("model_select");
+		void refreshQuotaIfNeeded("model_select");
 	});
 
 	pi.on("agent_settled", async (_event, _ctx) => {
-		await refreshQuotaIfNeeded("agent_settled");
+		void refreshQuotaIfNeeded("agent_settled");
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
