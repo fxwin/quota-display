@@ -1,19 +1,18 @@
 # pi-quota-display
 
-Pi extension that shows OpenAI Codex and GitHub Copilot quota in the footer.
+[Pi](https://pi.dev) extension that shows your OpenAI Codex or GitHub Copilot quota in the footer.
 
 ## Features
 
-- shows 5h and 1w quota for `openai-codex`
-- shows GitHub Copilot daily quota as `quota: used% / goal%`
-- uses your existing pi `/login` auth
-- only displays quota for the active subscription provider
-- refreshes when the session starts and when the agent settles
-- does not delay model switching for quota requests
+- shows Codex 5h and 1w quota
+- shows GitHub Copilot quota as used vs. goal
+- follows your currently active model/provider
+- uses your existing pi `/login`
+- refreshes in the background without slowing model switches
 
-## Install
+## Setup
 
-From git:
+1. Install the extension:
 
 ```bash
 pi install git:github.com/fxwin/quota-display
@@ -25,25 +24,12 @@ Or from a local checkout:
 pi install /absolute/path/to/quota-display
 ```
 
-Then run:
+2. Reload pi:
 
 ```bash
 /reload
 ```
 
-## Requirements
-
-- pi installed
-- authenticated in pi with `/login` to either:
-  - `ChatGPT Plus/Pro (Codex Subscription)`
-  - `GitHub Copilot`
-
-## Development
-
-This repo can be symlinked into pi's global extensions directory:
-
-```bash
-ln -s /absolute/path/to/quota-display/quota-display.ts ~/.pi/agent/extensions/quota-display.ts
-```
-
-Then edit the file here and run `/reload` in pi. Changes to quota fetching are performed in the background.
+3. Make sure you're logged in with `/login` for one or both of:
+   - ChatGPT Plus/Pro (Codex Subscription)
+   - GitHub Copilot

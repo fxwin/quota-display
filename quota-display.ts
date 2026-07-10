@@ -54,7 +54,7 @@ function getContextDisplay(ctx, theme, currentModel) {
 	return display;
 }
 
-function getUsageStats(sessionManager) {
+function calculateUsageStats(sessionManager) {
 	let totalInput = 0;
 	let totalOutput = 0;
 	let totalCacheRead = 0;
@@ -87,7 +87,7 @@ function getUsageStats(sessionManager) {
 	};
 }
 
-function getThinkingLevel(sessionManager) {
+function calculateThinkingLevel(sessionManager) {
 	let thinkingLevel = "off";
 	for (const entry of sessionManager.getBranch()) {
 		if (entry.type === "thinking_level_change") {
@@ -192,7 +192,7 @@ function getCopilotGoalPercent(quotaResetDate) {
 	return clampPercent((elapsedMs / totalMs) * 100);
 }
 
-function renderQuota(theme, quotaState) {
+function renderQuota(theme, quotaState, includeBullet = true) {
 	if (!quotaState?.primaryWindow || !quotaState?.secondaryWindow) return "";
 
 	const primaryColor = getWindowColor(theme, "5h", quotaState.primaryWindow.usedPercent);
@@ -205,22 +205,24 @@ function renderQuota(theme, quotaState) {
 		colorQuotaLabel(theme, secondaryColor, `1w ${formatPercent(quotaState.secondaryWindow.usedPercent)}`) +
 		theme.fg("dim", ` (${formatRemainingTime(quotaState.secondaryWindow.resetAtMs)})`);
 
-	return `${theme.fg("dim", " • ")}${primary}${theme.fg("dim", " | ")}${secondary}`;
+	const prefix = includeBullet ? theme.fg("dim", " • ") : "";
+	return `${prefix}${primary}${theme.fg("dim", " | ")}${secondary}`;
 }
 
-function renderCopilotQuota(theme, copilotQuotaState) {
+function renderCopilotQuota(theme, copilotQuotaState, includeBullet = true) {
 	const premium = copilotQuotaState?.premiumInteractions;
 	if (!premium || typeof premium.percentRemaining !== "number") return "";
 
+	const prefix = includeBullet ? theme.fg("dim", " • ") : "";
 	if (premium.unlimited) {
-		return `${theme.fg("dim", " • ")}quota: ${colorQuotaLabel(theme, "success", "∞")}`;
+		return `${prefix}quota: ${colorQuotaLabel(theme, "success", "∞")}`;
 	}
 
 	const usedPercent = clampPercent(100 - premium.percentRemaining);
 	const goalPercent = getCopilotGoalPercent(copilotQuotaState.quotaResetDate);
 	const color = getRemainingColor(premium.percentRemaining);
 	const quotaText = `quota: ${formatPercent(usedPercent)} / ${typeof goalPercent === "number" ? formatPercent(goalPercent) : "--"}`;
-	return `${theme.fg("dim", " • ")}${colorQuotaLabel(theme, color, quotaText)}`;
+	return `${prefix}${colorQuotaLabel(theme, color, quotaText)}`;
 }
 
 export default function openaiCodexQuotaExtension(pi) {
@@ -240,7 +242,19 @@ export default function openaiCodexQuotaExtension(pi) {
 		lastUpdatedAt: 0,
 		lastError: undefined,
 	};
-	let refreshInFlight = null;
+	let usageStats = {
+		totalInput: 0,
+		totalOutput: 0,
+		totalCacheRead: 0,
+		totalCacheWrite: 0,
+		totalCost: 0,
+		latestCacheHitRate: undefined,
+	};
+	let thinkingLevel = "off";
+	let codexRefreshInFlight = null;
+	let copilotRefreshInFlight = null;
+	let isShuttingDown = false;
+	const fetchControllers = new Set();
 	const requestRenderCallbacks = new Set();
 
 	function requestFooterRender() {
@@ -249,6 +263,31 @@ export default function openaiCodexQuotaExtension(pi) {
 				callback();
 			} catch {}
 		}
+	}
+
+	async function fetchWithTimeout(url, options) {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10_000);
+		timeout.unref?.();
+		fetchControllers.add(controller);
+		try {
+			return await fetch(url, { ...options, signal: controller.signal });
+		} finally {
+			clearTimeout(timeout);
+			fetchControllers.delete(controller);
+		}
+	}
+
+	function addUsage(usage) {
+		if (!usage) return;
+		usageStats.totalInput += usage.input || 0;
+		usageStats.totalOutput += usage.output || 0;
+		usageStats.totalCacheRead += usage.cacheRead || 0;
+		usageStats.totalCacheWrite += usage.cacheWrite || 0;
+		usageStats.totalCost += usage.cost?.total || 0;
+
+		const promptTokens = (usage.input || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0);
+		usageStats.latestCacheHitRate = promptTokens > 0 ? ((usage.cacheRead || 0) / promptTokens) * 100 : undefined;
 	}
 
 	async function fetchQuota() {
@@ -260,7 +299,7 @@ export default function openaiCodexQuotaExtension(pi) {
 			throw new Error("Missing OpenAI Codex OAuth credentials");
 		}
 
-		const response = await fetch(USAGE_URL, {
+		const response = await fetchWithTimeout(USAGE_URL, {
 			headers: {
 				Authorization: `Bearer ${apiKey}`,
 				"chatgpt-account-id": accountId,
@@ -306,7 +345,7 @@ export default function openaiCodexQuotaExtension(pi) {
 			throw new Error("Missing GitHub Copilot refresh token");
 		}
 
-		const response = await fetch(new URL("copilot_internal/user", apiUrl), {
+		const response = await fetchWithTimeout(new URL("copilot_internal/user", apiUrl), {
 			method: "GET",
 			headers: {
 				Authorization: `Bearer ${accessToken}`,
@@ -340,60 +379,77 @@ export default function openaiCodexQuotaExtension(pi) {
 		};
 	}
 
+	function shouldRefreshQuota() {
+		if (!currentModel) return false;
+		const now = Date.now();
+		if (isActiveCodexSubscriptionModel(currentModel, modelRegistry)) {
+			return (
+				!quotaState.primaryWindow ||
+				!quotaState.secondaryWindow ||
+				now - quotaState.lastUpdatedAt >= REFRESH_RENDER_INTERVAL_MS ||
+				Boolean(quotaState.lastError)
+			);
+		}
+		if (isActiveCopilotSubscriptionModel(currentModel, modelRegistry)) {
+			return (
+				!copilotQuotaState.premiumInteractions ||
+				now - copilotQuotaState.lastUpdatedAt >= REFRESH_RENDER_INTERVAL_MS ||
+				Boolean(copilotQuotaState.lastError)
+			);
+		}
+		return false;
+	}
+
 	async function refreshQuotaIfNeeded(reason) {
 		if (!currentModel) return;
 
 		if (isActiveCodexSubscriptionModel(currentModel, modelRegistry)) {
-			if (refreshInFlight) return refreshInFlight;
-			refreshInFlight = (async () => {
+			if (codexRefreshInFlight) return codexRefreshInFlight;
+			codexRefreshInFlight = (async () => {
 				try {
-					quotaState = await fetchQuota();
+					const nextQuotaState = await fetchQuota();
+					if (isShuttingDown) return;
+					quotaState = nextQuotaState;
 					requestFooterRender();
 				} catch (error) {
+					if (isShuttingDown) return;
 					quotaState = {
 						...quotaState,
 						lastError: error instanceof Error ? `${reason}: ${error.message}` : `${reason}: ${String(error)}`,
 					};
 					console.warn(`[quota-display] ${quotaState.lastError}`);
 				} finally {
-					refreshInFlight = null;
+					codexRefreshInFlight = null;
 				}
 			})();
-			return refreshInFlight;
+			return codexRefreshInFlight;
 		}
 
-		quotaState = {
-			primaryWindow: null,
-			secondaryWindow: null,
-			lastUpdatedAt: quotaState.lastUpdatedAt,
-			lastError: undefined,
-		};
+		quotaState = { ...quotaState, primaryWindow: null, secondaryWindow: null, lastError: undefined };
 
 		if (isActiveCopilotSubscriptionModel(currentModel, modelRegistry)) {
-			if (refreshInFlight) return refreshInFlight;
-			refreshInFlight = (async () => {
+			if (copilotRefreshInFlight) return copilotRefreshInFlight;
+			copilotRefreshInFlight = (async () => {
 				try {
-					copilotQuotaState = await fetchCopilotQuota();
+					const nextCopilotQuotaState = await fetchCopilotQuota();
+					if (isShuttingDown) return;
+					copilotQuotaState = nextCopilotQuotaState;
 					requestFooterRender();
 				} catch (error) {
+					if (isShuttingDown) return;
 					copilotQuotaState = {
 						...copilotQuotaState,
 						lastError: error instanceof Error ? `${reason}: ${error.message}` : `${reason}: ${String(error)}`,
 					};
 					console.warn(`[github-copilot-quota] ${copilotQuotaState.lastError}`);
 				} finally {
-					refreshInFlight = null;
+					copilotRefreshInFlight = null;
 				}
 			})();
-			return refreshInFlight;
+			return copilotRefreshInFlight;
 		}
 
-		copilotQuotaState = {
-			premiumInteractions: null,
-			quotaResetDate: undefined,
-			lastUpdatedAt: copilotQuotaState.lastUpdatedAt,
-			lastError: undefined,
-		};
+		copilotQuotaState = { ...copilotQuotaState, premiumInteractions: null, quotaResetDate: undefined, lastError: undefined };
 	}
 
 	function installFooter(ctx) {
@@ -413,7 +469,7 @@ export default function openaiCodexQuotaExtension(pi) {
 				},
 				invalidate() {},
 				render(width) {
-					const stats = getUsageStats(ctx.sessionManager);
+					const stats = usageStats;
 					const statsParts = [];
 
 					if (stats.totalInput) statsParts.push(`↑${formatTokens(stats.totalInput)}`);
@@ -432,7 +488,6 @@ export default function openaiCodexQuotaExtension(pi) {
 					let left = statsParts.join(" ");
 
 					let modelText = currentModel?.id || "no-model";
-					const thinkingLevel = getThinkingLevel(ctx.sessionManager);
 					if (currentModel?.reasoning) {
 						modelText = thinkingLevel === "off" ? `${modelText} • thinking off` : `${modelText} • ${thinkingLevel}`;
 					}
@@ -440,10 +495,11 @@ export default function openaiCodexQuotaExtension(pi) {
 						modelText = `(${currentModel.provider}) ${modelText}`;
 					}
 
+					let quotaText = "";
 					if (isActiveCodexSubscriptionModel(currentModel, modelRegistry)) {
-						modelText += renderQuota(theme, quotaState);
+						quotaText = renderQuota(theme, quotaState, false);
 					} else if (isActiveCopilotSubscriptionModel(currentModel, modelRegistry)) {
-						modelText += renderCopilotQuota(theme, copilotQuotaState);
+						quotaText = renderCopilotQuota(theme, copilotQuotaState, false);
 					}
 
 					let leftWidth = visibleWidth(left);
@@ -475,10 +531,22 @@ export default function openaiCodexQuotaExtension(pi) {
 					const sessionName = ctx.sessionManager.getSessionName();
 					if (sessionName) pwd += ` • ${sessionName}`;
 
-					const lines = [
-						truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "...")),
-						theme.fg("dim", left) + theme.fg("dim", statsLine.slice(left.length)),
-					];
+					let pathLine = theme.fg("dim", pwd);
+					if (quotaText) {
+						const quotaWidth = visibleWidth(quotaText);
+						if (quotaWidth >= width) {
+							pathLine = truncateToWidth(quotaText, width, "...");
+						} else {
+							const availablePathWidth = Math.max(0, width - quotaWidth - minPadding);
+							const truncatedPath = truncateToWidth(pathLine, availablePathWidth, theme.fg("dim", "..."));
+							const truncatedPathWidth = visibleWidth(truncatedPath);
+							pathLine = truncatedPath + " ".repeat(Math.max(0, width - truncatedPathWidth - quotaWidth)) + quotaText;
+						}
+					} else {
+						pathLine = truncateToWidth(pathLine, width, theme.fg("dim", "..."));
+					}
+
+					const lines = [pathLine, theme.fg("dim", left) + theme.fg("dim", statsLine.slice(left.length))];
 
 					const extensionStatuses = footerData.getExtensionStatuses();
 					if (extensionStatuses.size > 0) {
@@ -496,15 +564,36 @@ export default function openaiCodexQuotaExtension(pi) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		isShuttingDown = false;
 		currentModel = ctx.model;
 		modelRegistry = ctx.modelRegistry;
+		usageStats = calculateUsageStats(ctx.sessionManager);
+		thinkingLevel = calculateThinkingLevel(ctx.sessionManager);
 		installFooter(ctx);
 		void refreshQuotaIfNeeded("session_start");
+	});
+
+	pi.on("message_end", async (event, _ctx) => {
+		if (event.message.role === "assistant") addUsage(event.message.usage);
+	});
+
+	pi.on("thinking_level_select", async (event, _ctx) => {
+		thinkingLevel = event.level;
+		requestFooterRender();
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		thinkingLevel = calculateThinkingLevel(ctx.sessionManager);
+		requestFooterRender();
 	});
 
 	pi.on("model_select", async (event, ctx) => {
 		currentModel = event.model;
 		modelRegistry = ctx.modelRegistry;
+		requestFooterRender();
+		if (shouldRefreshQuota()) {
+			void refreshQuotaIfNeeded("model_select");
+		}
 	});
 
 	pi.on("agent_settled", async (_event, _ctx) => {
@@ -512,6 +601,10 @@ export default function openaiCodexQuotaExtension(pi) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		isShuttingDown = true;
+		for (const controller of fetchControllers) controller.abort();
+		fetchControllers.clear();
+		requestRenderCallbacks.clear();
 		if (ctx.mode === "tui") {
 			ctx.ui.setFooter(undefined);
 		}
