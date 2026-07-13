@@ -4,7 +4,7 @@
 
 ## Features
 
-- shows Codex 5h and weekly quota
+- shows available Codex quota windows (for example 5h and/or weekly)
 - shows GitHub Copilot monthly quota as used vs. goal
 - uses your existing pi `/login`
 

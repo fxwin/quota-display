@@ -107,8 +107,13 @@ function isActiveCopilotSubscriptionModel(currentModel, modelRegistry) {
 	return modelRegistry ? modelRegistry.isUsingOAuth(currentModel) : true;
 }
 
-function getWindowColor(theme, label, usedPercent) {
-	if (label === "5h") {
+function isShortQuotaWindow(limitWindowSeconds) {
+	const seconds = Number(limitWindowSeconds || 0);
+	return seconds > 0 && seconds <= 12 * 60 * 60;
+}
+
+function getWindowColor(limitWindowSeconds, usedPercent) {
+	if (isShortQuotaWindow(limitWindowSeconds)) {
 		if (usedPercent > 75) return "error";
 		if (usedPercent >= 50) return "warning";
 		return "success";
@@ -121,6 +126,17 @@ function getWindowColor(theme, label, usedPercent) {
 
 function formatPercent(usedPercent) {
 	return Number.isInteger(usedPercent) ? `${usedPercent}%` : `${usedPercent.toFixed(1)}%`;
+}
+
+function getWindowLabel(limitWindowSeconds, fallbackLabel = "quota") {
+	const seconds = Number(limitWindowSeconds || 0);
+	if (!Number.isFinite(seconds) || seconds <= 0) return fallbackLabel;
+	if (seconds === 5 * 60 * 60) return "5h";
+	if (seconds === 7 * 24 * 60 * 60) return "1w";
+	if (seconds % (24 * 60 * 60) === 0) return `${seconds / (24 * 60 * 60)}d`;
+	if (seconds % (60 * 60) === 0) return `${seconds / (60 * 60)}h`;
+	if (seconds % 60 === 0) return `${seconds / 60}m`;
+	return `${seconds}s`;
 }
 
 function formatResetTime(resetAtMs) {
@@ -193,20 +209,20 @@ function getCopilotGoalPercent(quotaResetDate) {
 }
 
 function renderQuota(theme, quotaState, includeBullet = true) {
-	if (!quotaState?.primaryWindow || !quotaState?.secondaryWindow) return "";
+	const windows = Array.isArray(quotaState?.windows) ? quotaState.windows : [];
+	if (!windows.length) return "";
 
-	const primaryColor = getWindowColor(theme, "5h", quotaState.primaryWindow.usedPercent);
-	const secondaryColor = getWindowColor(theme, "week", quotaState.secondaryWindow.usedPercent);
-
-	const primary =
-		colorQuotaLabel(theme, primaryColor, `5h ${formatPercent(quotaState.primaryWindow.usedPercent)}`) +
-		theme.fg("dim", ` (${formatResetTime(quotaState.primaryWindow.resetAtMs)})`);
-	const secondary =
-		colorQuotaLabel(theme, secondaryColor, `1w ${formatPercent(quotaState.secondaryWindow.usedPercent)}`) +
-		theme.fg("dim", ` (${formatRemainingTime(quotaState.secondaryWindow.resetAtMs)})`);
+	const parts = windows.map((window) => {
+		const color = getWindowColor(window.limitWindowSeconds, window.usedPercent);
+		const label = window.label || getWindowLabel(window.limitWindowSeconds);
+		const resetText = isShortQuotaWindow(window.limitWindowSeconds)
+			? formatResetTime(window.resetAtMs)
+			: formatRemainingTime(window.resetAtMs);
+		return colorQuotaLabel(theme, color, `${label} ${formatPercent(window.usedPercent)}`) + theme.fg("dim", ` (${resetText})`);
+	});
 
 	const prefix = includeBullet ? theme.fg("dim", " • ") : "";
-	return `${prefix}${primary}${theme.fg("dim", " | ")}${secondary}`;
+	return `${prefix}${parts.join(theme.fg("dim", " | "))}`;
 }
 
 function renderCopilotQuota(theme, copilotQuotaState, includeBullet = true) {
@@ -231,8 +247,7 @@ export default function openaiCodexQuotaExtension(pi) {
 	let currentModel;
 	let modelRegistry;
 	let quotaState = {
-		primaryWindow: null,
-		secondaryWindow: null,
+		windows: [],
 		lastUpdatedAt: 0,
 		lastError: undefined,
 	};
@@ -315,21 +330,25 @@ export default function openaiCodexQuotaExtension(pi) {
 		}
 
 		const payload = await response.json();
-		const primary = payload?.rate_limit?.primary_window;
-		const secondary = payload?.rate_limit?.secondary_window;
-		if (!primary || !secondary) {
+		const windows = [
+			payload?.rate_limit?.primary_window,
+			payload?.rate_limit?.secondary_window,
+		]
+			.filter((window) => window && typeof window === "object")
+			.map((window) => ({
+				label: getWindowLabel(window.limit_window_seconds),
+				usedPercent: Number(window.used_percent || 0),
+				resetAtMs: Number(window.reset_at || 0) * 1000,
+				limitWindowSeconds: Number(window.limit_window_seconds || 0),
+			}))
+			.filter((window) => Number.isFinite(window.usedPercent) && Number.isFinite(window.resetAtMs))
+			.sort((a, b) => a.limitWindowSeconds - b.limitWindowSeconds);
+		if (!windows.length) {
 			throw new Error(`Unexpected OpenAI Codex usage payload: ${JSON.stringify(payload)}`);
 		}
 
 		return {
-			primaryWindow: {
-				usedPercent: Number(primary.used_percent || 0),
-				resetAtMs: Number(primary.reset_at || 0) * 1000,
-			},
-			secondaryWindow: {
-				usedPercent: Number(secondary.used_percent || 0),
-				resetAtMs: Number(secondary.reset_at || 0) * 1000,
-			},
+			windows,
 			lastUpdatedAt: Date.now(),
 			lastError: undefined,
 		};
@@ -384,8 +403,7 @@ export default function openaiCodexQuotaExtension(pi) {
 		const now = Date.now();
 		if (isActiveCodexSubscriptionModel(currentModel, modelRegistry)) {
 			return (
-				!quotaState.primaryWindow ||
-				!quotaState.secondaryWindow ||
+				!quotaState.windows.length ||
 				now - quotaState.lastUpdatedAt >= REFRESH_RENDER_INTERVAL_MS ||
 				Boolean(quotaState.lastError)
 			);
@@ -425,7 +443,7 @@ export default function openaiCodexQuotaExtension(pi) {
 			return codexRefreshInFlight;
 		}
 
-		quotaState = { ...quotaState, primaryWindow: null, secondaryWindow: null, lastError: undefined };
+		quotaState = { ...quotaState, windows: [], lastError: undefined };
 
 		if (isActiveCopilotSubscriptionModel(currentModel, modelRegistry)) {
 			if (copilotRefreshInFlight) return copilotRefreshInFlight;
