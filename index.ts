@@ -1,10 +1,11 @@
-import { AuthStorage } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import * as fs from "node:fs";
 import * as os from "node:os";
 
 const OPENAI_CODEX_PROVIDER = "openai-codex";
 const GITHUB_COPILOT_PROVIDER = "github-copilot";
+const PI_AUTH_PATH = resolve(os.homedir(), ".pi/agent/auth.json");
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const USER_INFO_API_VERSION = "2026-06-01";
 const REFRESH_RENDER_INTERVAL_MS = 60_000;
@@ -17,6 +18,27 @@ const COPILOT_HEADERS = {
 
 function sanitizeStatusText(text) {
 	return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+}
+
+function readAuthData() {
+	try {
+		return JSON.parse(fs.readFileSync(PI_AUTH_PATH, "utf8"));
+	} catch {
+		return {};
+	}
+}
+
+function getCredential(provider) {
+	const credential = readAuthData()?.[provider];
+	return credential && typeof credential === "object" ? credential : undefined;
+}
+
+function getApiKey(provider) {
+	const credential = getCredential(provider);
+	if (!credential) return undefined;
+	if (credential.type === "oauth" && typeof credential.access === "string") return credential.access;
+	if (credential.type === "api_key" && typeof credential.key === "string") return credential.key;
+	return undefined;
 }
 
 function formatTokens(count) {
@@ -242,8 +264,6 @@ function renderCopilotQuota(theme, copilotQuotaState, includeBullet = true) {
 }
 
 export default function openaiCodexQuotaExtension(pi) {
-	const authStorage = AuthStorage.create();
-
 	let currentModel;
 	let modelRegistry;
 	let quotaState = {
@@ -306,8 +326,8 @@ export default function openaiCodexQuotaExtension(pi) {
 	}
 
 	async function fetchQuota() {
-		const apiKey = await authStorage.getApiKey(OPENAI_CODEX_PROVIDER);
-		const credential = authStorage.get(OPENAI_CODEX_PROVIDER);
+		const apiKey = getApiKey(OPENAI_CODEX_PROVIDER);
+		const credential = getCredential(OPENAI_CODEX_PROVIDER);
 		const accountId = credential?.type === "oauth" ? credential.accountId : undefined;
 
 		if (!apiKey || !accountId) {
@@ -355,7 +375,7 @@ export default function openaiCodexQuotaExtension(pi) {
 	}
 
 	async function fetchCopilotQuota() {
-		const credential = authStorage.get(GITHUB_COPILOT_PROVIDER);
+		const credential = getCredential(GITHUB_COPILOT_PROVIDER);
 		const serverUrl = normalizeServerUrl(credential?.enterpriseUrl) || "https://github.com";
 		const apiUrl = getApiUrl(serverUrl);
 		const accessToken = credential?.refresh;
