@@ -10,10 +10,10 @@
 
 ## Compatibility
 
-Tested with pi `0.84.4`. Install the matching tagged version with:
+Tags named `pi-vX.Y.Z` identify commits compatible with pi version `X.Y.Z`. To install a specific version, replace `X.Y.Z` with the desired pi version:
 
 ```bash
-pi install git:github.com/fxwin/quota-display@pi-v0.84.4
+pi install git:github.com/fxwin/quota-display@pi-vX.Y.Z
 ```
 
 ## Setup
