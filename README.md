@@ -8,6 +8,14 @@
 - shows GitHub Copilot monthly quota as used vs. goal
 - uses your existing pi `/login`
 
+## Compatibility
+
+Tested with pi `0.84.4`. Install the matching tagged version with:
+
+```bash
+pi install git:github.com/fxwin/quota-display@pi-v0.84.4
+```
+
 ## Setup
 
 1. Install the extension:
