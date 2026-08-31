@@ -1,7 +1,7 @@
 {
   "name": "pi-quota-display",
-  "version": "0.1.0",
-  "description": "Pi extension that shows OpenAI Codex subscription quota in the footer.",
+  "version": "0.1.1",
+  "description": "Pi extension that shows OpenAI Codex and GitHub Copilot quota in the footer.",
   "keywords": ["pi-package"],
   "license": "MIT",
   "pi": {
